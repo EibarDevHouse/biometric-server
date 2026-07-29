@@ -58,7 +58,7 @@ const COMMAND_TEMPLATES: Record<
   CLEAR_ENROLL_DATA: { label: 'Clear Enrollment Data' },
 };
 
-async function queueCommand(formData: FormData) {
+async function queueCommand(formData: FormData): Promise<void> {
   'use server';
 
   const devId = formData.get('dev_id') as string;
@@ -66,7 +66,7 @@ async function queueCommand(formData: FormData) {
   const params = formData.get('params') as string;
 
   if (!devId || !cmdCode) {
-    return { error: 'Missing device or command' };
+    throw new Error('Missing device or command');
   }
 
   await initDb();
@@ -78,9 +78,8 @@ async function queueCommand(formData: FormData) {
        VALUES (?, ?, ?, 'WAIT')`,
       [devId, cmdCode, JSON.stringify(parsedParams)],
     );
-    return { success: true };
   } catch (err) {
-    return { error: String(err) };
+    throw new Error(String(err));
   }
 }
 
