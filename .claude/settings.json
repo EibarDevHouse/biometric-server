@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "PowerShell(npm install)",
+      "PowerShell(npm run dev 2>&1)",
+      "PowerShell(Invoke-WebRequest -Uri \"http://localhost:3000/\" -UseBasicParsing)",
+      "PowerShell(npx tsx scripts/verify-db.ts)",
+      "PowerShell(Invoke-WebRequest -Uri \"http://localhost:3000/\" -UseBasicParsing -ErrorAction SilentlyContinue)",
+      "PowerShell(npm test)",
+      "PowerShell(npx tsx scripts/check-devices.ts)",
+      "PowerShell(npx tsx scripts/queue-test-command.ts)",
+      "PowerShell(npx tsc --noEmit scripts/simulator.ts 2>&1)",
+      "PowerShell(head -20)"
+    ]
+  }
+}
