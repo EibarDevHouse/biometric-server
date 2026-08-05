@@ -22,12 +22,17 @@ export async function handleReceiveCmd(
 
   const { json } = parseBody(requestBody);
 
-  // Upsert device
+  // Upsert device. Real firmware nests the capability fields under `fk_info`:
+  //   {"fk_name":"","fk_time":"...","fk_info":{"firmware":"WS535BW1_BSCS_v1.5.31",
+  //    "fk_bin_data_lib":"FKDATAHS101","supported_enroll_data":["FP","PASSWORD"]}}
+  // Fall back to the top level so the simulator and e2e suite keep working.
+  const info = json?.fk_info ?? {};
   const fkName = json?.fk_name || null;
-  const firmware = json?.firmware || null;
-  const fkBinDataLib = json?.fk_bin_data_lib || null;
-  const supportedEnrollData = json?.supported_enroll_data
-    ? JSON.stringify(json.supported_enroll_data)
+  const firmware = info.firmware ?? json?.firmware ?? null;
+  const fkBinDataLib = info.fk_bin_data_lib ?? json?.fk_bin_data_lib ?? null;
+  const rawEnrollData = info.supported_enroll_data ?? json?.supported_enroll_data;
+  const supportedEnrollData = rawEnrollData
+    ? JSON.stringify(rawEnrollData)
     : null;
 
   await runAsync(
@@ -64,6 +69,13 @@ export async function handleReceiveCmd(
 
     // Build response with command
     const cmdParams = command.cmd_param ? JSON.parse(command.cmd_param) : {};
+
+    // A SET_TIME queued without an explicit time syncs to the moment of
+    // delivery. Stamping it at queue time leaves the device seconds behind,
+    // because it only picks the command up on its next poll (~10s).
+    if (command.cmd_code === "SET_TIME" && !cmdParams.time) {
+      cmdParams.time = toDeviceTime();
+    }
     const resp = buildResponse({
       responseCode: "OK",
       transId: command.trans_id,

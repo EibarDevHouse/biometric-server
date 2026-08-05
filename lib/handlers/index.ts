@@ -19,7 +19,14 @@ export async function logRawTraffic(
   headers: Record<string, string>,
   body: Buffer
 ) {
-  const bodyPreview = body.subarray(0, 2000).toString("utf-8", 0, 2000);
+  const head = body.subarray(0, 2000);
+  // Devices concatenate binary after the JSON, so a plain utf-8 decode turns
+  // into replacement characters. Keep the text when it round-trips, otherwise
+  // fall back to hex so the bytes stay inspectable.
+  const asText = head.toString("utf-8");
+  const bodyPreview = Buffer.from(asText, "utf-8").equals(head)
+    ? asText
+    : `hex: ${head.toString("hex")}`;
   const bodySize = body.length;
   const binaryStart = findJsonEnd(body);
   const binarySize = binaryStart !== -1 ? body.length - binaryStart : 0;
@@ -92,8 +99,17 @@ export async function handleBiometricRequest(
   });
 
   try {
-    // Log incoming request (temporarily disabled for debugging)
-    // await logRawTraffic("in", devId, requestCode, headersRecord, requestBody);
+    // Log incoming request. Never let a logging failure break the response —
+    // the device retries poorly and we lose the trace either way.
+    try {
+      await logRawTraffic("in", devId, requestCode, headersRecord, requestBody);
+    } catch (logErr) {
+      console.error("[traffic] failed to log incoming request:", logErr);
+    }
+
+    console.log(
+      `[in] dev=${devId} code=${requestCode} bytes=${requestBody.length}`
+    );
 
     // Dispatch based on request_code
     switch (requestCode) {

@@ -23,7 +23,7 @@ async function request(
       headers: {
         "Content-Type": "application/octet-stream",
         ...headers,
-      },
+      } as Record<string, string>,
     };
 
     if (body) {

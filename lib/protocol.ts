@@ -20,26 +20,104 @@ export function parseBody(buf: Buffer): ParsedBody {
     return { json: null, binaries: [] };
   }
 
+  // A body starting with `{` is the flat shape: JSON followed by raw binary.
+  // Our simulator, the e2e suite and hand-rolled curl calls all use it.
+  if (buf[0] === 0x7b) {
+    return parseFlatBody(buf);
+  }
+
+  const blocks = readLengthPrefixedBlocks(buf);
+  if (!blocks || blocks.length === 0) {
+    // Not the block shape after all — try to read it flat before giving up.
+    return parseFlatBody(buf);
+  }
+
+  let json: Record<string, any> | null = null;
+  try {
+    json = JSON.parse(stripTrailingNul(blocks[0]).toString("utf-8"));
+  } catch {
+    return { json: null, binaries: [] };
+  }
+
+  return { json, binaries: blocks.slice(1) };
+}
+
+/**
+ * Real devices frame the body as a sequence of length-prefixed blocks, each
+ * prefix a little-endian uint32. Block 0 is the NUL-terminated JSON; the blocks
+ * after it are the `BIN_1`, `BIN_2`… the JSON refers to. Verified against
+ * firmware WS535BW1_BSCS_v1.5.31:
+ *
+ *   41 00 00 00                                            (65)
+ *   {"user_id_count":3,"one_user_id_size":8,
+ *    "user_id_array":"BIN_1"} 00                            64 bytes + NUL
+ *   18 00 00 00                                            (24)
+ *   01 00 00 00 01 01 08 00  …                              3 users x 8 bytes
+ *
+ * Returns null when the framing does not hold, so callers can fall back.
+ */
+function readLengthPrefixedBlocks(buf: Buffer): Buffer[] | null {
+  const blocks: Buffer[] = [];
+  let offset = 0;
+
+  while (offset + 4 <= buf.length) {
+    const len = buf.readUInt32LE(offset);
+    offset += 4;
+
+    if (len === 0 || offset + len > buf.length) return null;
+    blocks.push(buf.subarray(offset, offset + len));
+    offset += len;
+
+    // Trailing padding after the last block is fine; anything longer than a
+    // stray byte or two means we misread the framing.
+    const left = buf.length - offset;
+    if (left > 0 && left < 4) {
+      if (!isPadding(buf.subarray(offset))) return null;
+      break;
+    }
+  }
+
+  return blocks.length > 0 ? blocks : null;
+}
+
+/** JSON at byte 0, optional binary appended directly after the closing brace. */
+function parseFlatBody(buf: Buffer): ParsedBody {
   const jsonEnd = findJsonEnd(buf);
   if (jsonEnd === -1) {
-    // No valid JSON found
     return { json: null, binaries: [] };
   }
 
   let json: Record<string, any> | null = null;
   try {
-    const jsonStr = buf.subarray(0, jsonEnd).toString("utf-8");
-    json = JSON.parse(jsonStr);
+    json = JSON.parse(buf.subarray(0, jsonEnd).toString("utf-8"));
   } catch {
     return { json: null, binaries: [] };
   }
 
   const binaries: Buffer[] = [];
-  if (jsonEnd < buf.length) {
-    binaries.push(buf.subarray(jsonEnd));
+  const trailing = buf.subarray(jsonEnd);
+  if (trailing.length > 0 && !isPadding(trailing)) {
+    binaries.push(trailing);
   }
 
   return { json, binaries };
+}
+
+function stripTrailingNul(buf: Buffer): Buffer {
+  let end = buf.length;
+  while (end > 0 && buf[end - 1] === 0x00) end--;
+  return buf.subarray(0, end);
+}
+
+/**
+ * Trailing NUL / CR / LF / space the firmware pads bodies with. Treating it as
+ * a binary block would store a couple of junk bytes as a fingerprint or photo.
+ */
+function isPadding(buf: Buffer): boolean {
+  for (const b of buf) {
+    if (b !== 0x00 && b !== 0x0a && b !== 0x0d && b !== 0x20) return false;
+  }
+  return true;
 }
 
 /**
@@ -125,18 +203,44 @@ export function buildResponse(opts: ResponseOptions) {
     headers["cmd_code"] = opts.cmdCode;
   }
 
+  // Frame the body the same way the device frames its own: a length-prefixed
+  // NUL-terminated JSON block, then one length-prefixed block per binary.
+  //
+  // Commands that take no parameters worked with raw JSON because the firmware
+  // never reads their body. SET_TIME does read it, and rejected unframed JSON
+  // with cmd_return_code=Error until the framing matched.
+  const blocks: Buffer[] = [];
+
   if (opts.bodyJson) {
-    const jsonStr = JSON.stringify(opts.bodyJson);
-    body = Buffer.concat([body, Buffer.from(jsonStr, "utf-8")]);
+    blocks.push(
+      Buffer.concat([
+        Buffer.from(JSON.stringify(opts.bodyJson), "utf-8"),
+        Buffer.from([0x00]),
+      ]),
+    );
   }
 
   if (opts.binary && opts.binary.length > 0) {
-    body = Buffer.concat([body, opts.binary]);
+    blocks.push(opts.binary);
   }
 
+  if (blocks.length > 0) {
+    body = Buffer.concat(blocks.map(withLengthPrefix));
+  }
+
+  // The device sends blk_no/blk_len on its own requests; mirror them back.
+  headers["blk_no"] = "0";
+  headers["blk_len"] = String(body.length);
   headers["Content-Length"] = String(body.length);
 
   return { headers, body };
+}
+
+/** Prepend a block's length as a little-endian uint32. */
+function withLengthPrefix(block: Buffer): Buffer {
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32LE(block.length, 0);
+  return Buffer.concat([prefix, block]);
 }
 
 /**

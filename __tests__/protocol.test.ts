@@ -136,3 +136,95 @@ test("toDeviceTime and parseDeviceTime round-trip", () => {
   assert.equal(parsedDate.getMonth(), originalDate.getMonth());
   assert.equal(parsedDate.getDate(), originalDate.getDate());
 });
+
+// --- Real-device body framing (device 2023081158, firmware WS535BW1_BSCS_v1.5.31) ---
+
+/** Prefix a payload with its length as a little-endian uint32, like the firmware does. */
+function withLengthPrefix(payload: Buffer): Buffer {
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32LE(payload.length, 0);
+  return Buffer.concat([prefix, payload]);
+}
+
+test("parseBody - strips the device's uint32 LE length prefix", () => {
+  const json = {
+    fk_name: "",
+    fk_time: "20000101024026",
+    fk_info: { firmware: "WS535BW1_BSCS_v1.5.31" },
+  };
+  const buf = withLengthPrefix(Buffer.from(JSON.stringify(json), "utf-8"));
+
+  const result = parseBody(buf);
+  assert.deepEqual(result.json, json);
+  assert.equal(result.binaries.length, 0);
+});
+
+test("parseBody - length-prefixed blocks: JSON block plus BIN_1", () => {
+  // Byte-for-byte the GET_USER_ID_LIST result captured from the real device.
+  const jsonBlock = Buffer.concat([
+    Buffer.from(
+      '{"user_id_count":3,"one_user_id_size":8,"user_id_array":"BIN_1"}',
+      "utf-8",
+    ),
+    Buffer.from([0x00]), // firmware NUL-terminates the JSON block
+  ]);
+  const bin1 = Buffer.from(
+    "010000000101080002000000020108000300000001010800",
+    "hex",
+  );
+  const buf = Buffer.concat([
+    withLengthPrefix(jsonBlock),
+    withLengthPrefix(bin1),
+  ]);
+
+  const result = parseBody(buf);
+  assert.deepEqual(result.json, {
+    user_id_count: 3,
+    one_user_id_size: 8,
+    user_id_array: "BIN_1",
+  });
+  assert.equal(result.binaries.length, 1);
+  assert.deepEqual(result.binaries[0], bin1);
+  // 3 users x one_user_id_size
+  assert.equal(result.binaries[0].length, 24);
+});
+
+test("parseBody - length-prefixed blocks: several binaries stay separate", () => {
+  // The old parser lumped every trailing byte into binaries[0], which made
+  // BIN_1 vs BIN_2 impossible to tell apart.
+  const jsonBlock = Buffer.from('{"a":"BIN_1","b":"BIN_2"}', "utf-8");
+  const bin1 = Buffer.from([0x11, 0x22, 0x33]);
+  const bin2 = Buffer.from([0xaa, 0xbb]);
+  const buf = Buffer.concat([
+    withLengthPrefix(jsonBlock),
+    withLengthPrefix(bin1),
+    withLengthPrefix(bin2),
+  ]);
+
+  const result = parseBody(buf);
+  assert.deepEqual(result.json, { a: "BIN_1", b: "BIN_2" });
+  assert.equal(result.binaries.length, 2);
+  assert.deepEqual(result.binaries[0], bin1);
+  assert.deepEqual(result.binaries[1], bin2);
+});
+
+test("parseBody - trailing NUL/newline padding is not treated as binary", () => {
+  // The firmware pads realtime_glog bodies with bytes like 00 0a; storing those
+  // as binaries[0] would persist 2 bytes of junk as a fingerprint or photo.
+  const json = { user_id: "1", verify_mode: "33", io_time: "20000101025023" };
+  const buf = Buffer.concat([
+    Buffer.from(JSON.stringify(json), "utf-8"),
+    Buffer.from([0x00, 0x0a]),
+  ]);
+
+  const result = parseBody(buf);
+  assert.deepEqual(result.json, json);
+  assert.equal(result.binaries.length, 0);
+});
+
+test("parseBody - a 4-byte value that is not a length prefix is left alone", () => {
+  // Bodies that already start with `{` must never be reinterpreted.
+  const json = { a: 1 };
+  const result = parseBody(Buffer.from(JSON.stringify(json), "utf-8"));
+  assert.deepEqual(result.json, json);
+});

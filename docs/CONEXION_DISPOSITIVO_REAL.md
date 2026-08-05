@@ -1,8 +1,23 @@
 # Guía: Conexión de Dispositivo Biométrico Real
 
-**Última actualización:** 2026-07-29  
-**Versión:** 1.0
+**Última actualización:** 2026-08-05
+**Versión:** 1.1
 
+> ## ⚠️ Si el dispositivo "no aparece", lee esto primero
+>
+> Dos cosas hacen que un equipo perfectamente conectado no aparezca nunca, y
+> ninguna es de red:
+>
+> 1. **`Net Mode` en `Local`.** En ese modo el equipo es un servidor pasivo y el
+>    campo "Server Set" se ignora — el manual mismo dice *"Useless in local
+>    network"*. Ponlo en **`Internet`** para que use el modelo push.
+> 2. **El dispositivo hace `POST //`**, no `POST /`. Next responde 308 y el
+>    firmware, que habla HTTP/1.0, no sigue redirects.
+>
+> Ambas ya están resueltas — ver [Caso real](#caso-real-dispositivo-mudo-2026-08-05).
+> El servidor arranca con `npm run dev`, que ahora usa [server.ts](../server.ts):
+> **no uses `next dev` directo** o el `POST //` volverá a fallar.
+4
 ---
 
 ## 📋 Contenido
@@ -13,6 +28,7 @@
 4. [Primeros pasos](#primeros-pasos)
 5. [Troubleshooting](#troubleshooting)
 6. [Monitoreo en tiempo real](#monitoreo-en-tiempo-real)
+7. [Caso real: dispositivo mudo](#caso-real-dispositivo-mudo-2026-08-05) ← resuelto; empieza aquí si el equipo "no aparece"
 
 ---
 
@@ -103,11 +119,29 @@ Parameters: {
 
 ### 1. Verificar que el servidor está escuchando
 
-```bash
-# En el servidor
-netstat -an | grep 3000
-# Output esperado: Listening on 0.0.0.0:3000
+```powershell
+# Windows (PowerShell)
+netstat -ano | Select-String "LISTENING" | Select-String ":3000\s"
+# Output esperado: TCP  0.0.0.0:3000  0.0.0.0:*  LISTENING  <pid>
 ```
+
+```bash
+# Linux / macOS
+netstat -an | grep 3000
+```
+
+Debe decir `0.0.0.0:3000`, no `127.0.0.1:3000` — si dice `127.0.0.1` solo acepta
+conexiones locales y el dispositivo nunca podrá llegar.
+
+**Verifica también si el dispositivo ya está conectando** (sustituye por su IP):
+
+```powershell
+netstat -ano | Select-String "192.168.0.116"
+```
+
+Si aparecen líneas en `ESTABLISHED`, el dispositivo **sí alcanza el servidor** y
+el problema no es de red — salta a [Caso real: dispositivo
+mudo](#caso-real-dispositivo-mudo-2026-08-05).
 
 ### 2. Verificar que el dispositivo puede alcanzar el servidor
 
@@ -480,6 +514,217 @@ Si algo no funciona:
 2. **Expande un comando en `/admin/commands`** — ¿cuál es la respuesta?
 3. **Verifica timestamp en logs** — ¿la hora es correcta?
 4. **Consulta el manual del dispositivo** — parámetros pueden variar por modelo
+
+---
+
+## Caso real: dispositivo mudo (2026-08-05)
+
+Registro del primer intento de conectar un equipo físico. **Léelo antes de
+diagnosticar un dispositivo que "no aparece"** — evita repetir horas de trabajo.
+
+### El equipo
+
+| Dato | Valor |
+|---|---|
+| Serial (`dev_id`) | `2023081158` |
+| Versión de software | `WS535BW1_BSCS_v1.5.31` |
+| MAC | `E8:AB:FA:84:C7:0E` → Shenzhen Reecam Tech. Ltd. (OEM genérico) |
+| IP en la red | `192.168.0.116` |
+| Puerto propio del equipo | 5005 (único puerto abierto; **no** es el puerto del servidor) |
+| Marca visible | ninguna — carcasa sin logo ni modelo |
+
+### El síntoma
+
+El dispositivo **abre una conexión TCP nueva al servidor cada ~11 segundos**,
+mantiene 6 o 7 vivas simultáneamente, y **no envía ni un solo byte** por
+ninguna. Node lo desconecta por timeout a los ~70 segundos y el dispositivo
+reconecta:
+
+```
+17:30:09  conn#1 OPEN from 192.168.0.116:5018  → 0 bytes
+17:30:20  conn#2 OPEN from 192.168.0.116:5019  → 0 bytes
+17:30:31  conn#3 OPEN from 192.168.0.116:5020  → 0 bytes
+          ... 36 conexiones, cero bytes en total ...
+```
+
+### Lo que quedó DESCARTADO (con evidencia, no por suposición)
+
+No pierdas tiempo aquí si ves este síntoma:
+
+| Hipótesis | Cómo se descartó |
+|---|---|
+| Problema de red / IP / subred | `ping` bidireccional OK; ambos en `192.168.0.x/24` |
+| Firewall de Windows bloqueando | Regla de Node.js permitida en perfil privado; y el handshake TCP **completa** (estado `ESTABLISHED`) |
+| Servidor no escuchando | `netstat` muestra `0.0.0.0:3000 LISTENING` |
+| Puerto del servidor mal configurado | El dispositivo llega al puerto correcto — de ahí las conexiones establecidas |
+| El MESH WiFi separaba las redes | Se conectó por LAN directo al router; mismo comportamiento |
+| Puerto 5005 mal configurado | 5005 es el puerto **del dispositivo**, no del servidor. Irrelevante para el push |
+| El equipo solo transmite al haber un evento | Se marcó con el dedo y se registró una huella nueva: **cero bytes** |
+
+### Lo que se intentó sin éxito
+
+- **11 framings de saludo** enviados al dispositivo por la conexión que él mismo
+  abre (`npm run handshake-probe`): reverse-HTTP `GET`/`POST`, respuesta HTTP 200
+  con `response_code: OK`, ZKTeco `CMD_CONNECT` y `CMD_DEVICE` (con checksum
+  válido y wrapper TCP `50 50 82 7d`), framing `0x55AA`, Anviz `0xA5`, CRLF, byte
+  nulo, y escucha pasiva. **Ninguna respuesta.**
+- **Puerto 5005 del dispositivo**: HTTP/1.1 con `Host`, `POST` con headers del
+  protocolo, `/cgi-bin/`, framings binarios, escucha pasiva. Acepta la conexión
+  TCP y **no contesta nada**.
+- **UDP**: 60 probes en 5 puertos (unicast + broadcast), escuchando en 6 puertos.
+  **Cero paquetes del dispositivo.**
+- **Ajuste `Servdr req` de No → Sí** en el menú del equipo, con reinicio. Sin
+  cambio de comportamiento.
+- **Búsqueda de documentación** de `WS535BW1`, `BSCS` y el OUI de Reecam: sin
+  resultados públicos.
+
+### ✅ Resuelto — dos causas, ninguna de red
+
+**Causa 1: `Net Mode` estaba en `Local`.**
+
+La página 4/4 del manual físico lo explica:
+
+> **【Net Mode】**: *Local* means Local network. ***Internet*** means WAN/Web based
+> **/BS/Cloud**, user need to follow our communication protocol to do secondary
+> development.
+>
+> **【Server Set】**: **Useless in local network. Please ignore and no need to set.**
+
+En `Local` el equipo es un servidor pasivo en su puerto 5005 y **el campo Server
+Set se ignora** — de ahí los sockets mudos. El modo `Internet` es el BS/Cloud,
+que sí hace push al servidor.
+
+```
+Comm Set  →  2. TCP/IP  →  3. Net Mode  →  Internet
+Comm Set  →  2. TCP/IP  →  2. Server Set  →  IP y puerto del servidor
+```
+
+**Causa 2: el dispositivo hace `POST //`, no `POST /`.**
+
+```
+POST // HTTP/1.0
+request_code:receive_cmd
+dev_id: 2023081158
+blk_no: 0
+blk_len: 223
+HOST: 192.168.0.114
+```
+
+Next colapsa los slashes repetidos con un **308 Permanent Redirect**, y lo hace
+antes de `proxy.ts`, antes de `redirects` y antes del routing — no se puede
+desactivar desde `next.config`. El firmware habla HTTP/1.0 y nunca sigue
+redirects, así que **1802 peticiones murieron en el redirect** sin llegar nunca
+a `app/route.ts`.
+
+Resuelto en [server.ts](../server.ts), un servidor Next personalizado que
+normaliza `req.url` antes de entregárselo a Next. Por eso `npm run dev` ahora
+corre `tsx server.ts`. **`next dev` directo rompe el dispositivo** — quedó
+disponible como `npm run dev:next` solo para trabajar en la UI.
+
+### Formato real del body
+
+Descubierto con el sniffer y verificado contra 4 respuestas distintas. **No es
+"JSON + binario"**, es una secuencia de bloques con prefijo de longitud
+(`uint32` little-endian). El bloque 0 es el JSON terminado en NUL; los que siguen
+son los `BIN_1`, `BIN_2`… que el JSON referencia:
+
+```
+41 00 00 00                                          ← uint32 LE = 65
+{"user_id_count":3,"one_user_id_size":8,
+ "user_id_array":"BIN_1"}                            ← 64 bytes
+00                                                   ← NUL (64 + 1 = 65 ✓)
+18 00 00 00                                          ← uint32 LE = 24
+01 00 00 00 01 01 08 00                              ← usuario 1
+02 00 00 00 02 01 08 00                              ← usuario 2
+03 00 00 00 01 01 08 00                              ← usuario 3
+```
+
+`parseBody` en [lib/protocol.ts](../lib/protocol.ts) maneja las dos formas: si el
+body empieza con `{` lo lee plano (simulador, e2e, curl); si no, lo lee por
+bloques. Comprobado:
+
+| Comando | JSON | Binario | Cuadra |
+|---|---|---|---|
+| `GET_USER_ID_LIST` | `user_id_count: 3, one_user_id_size: 8` | 24 B | 3 × 8 ✓ |
+| `GET_LOG_DATA` | `log_count: 30, one_log_size: 12` | 360 B | 30 × 12 ✓ |
+| `GET_DEVICE_STATUS` | 7 campos | — | ✓ |
+
+### Otros detalles del firmware
+
+- **Las capacidades vienen anidadas en `fk_info`**, no al nivel raíz:
+  `{"fk_name":"","fk_time":"...","fk_info":{"firmware":"WS535BW1_BSCS_v1.5.31",
+  "fk_bin_data_lib":"FKDATAHS101","supported_enroll_data":["FP","PASSWORD","IDCARD"]}}`
+- **El body trae padding NUL/newline al final.** Sin filtrarlo se guardaban 2
+  bytes de basura como si fueran una huella o una foto en `log_image`.
+- **El reloj arranca en el año 2000** (`io_time: "20000101025023"`). Hay que
+  sincronizarlo o las marcaciones no sirven.
+
+### Las respuestas del servidor también van framed
+
+`SET_TIME` devolvía `ERROR` mientras le mandábamos JSON crudo. La causa era la
+misma asimetría: **el firmware espera que las respuestas del servidor usen el
+mismo framing que sus propias peticiones.** La prueba fue limpia — mismo comando,
+mismo parámetro, solo cambió el framing:
+
+| Body enviado | Resultado |
+|---|---|
+| `{"time":"20260805182800"}` — 25 B crudos | ❌ `ERROR` |
+| `1a000000` + `{"time":"..."}` + `00` — 30 B | ✅ `RESULT / OK` |
+
+Los comandos sin parámetros (`GET_DEVICE_STATUS`, `GET_LOG_DATA`…) funcionaban
+igual sin framing porque el firmware nunca lee su body. Solo falla en los que sí
+lo leen.
+
+`buildResponse` en [lib/protocol.ts](../lib/protocol.ts) ahora arma el body como
+bloques con prefijo de longitud y agrega los headers `blk_no: 0` y `blk_len`,
+espejando lo que manda el dispositivo.
+
+### SET_TIME: déjalo sin parámetros
+
+El dispositivo solo aplica el comando en su siguiente poll, hasta ~10 segundos
+después de encolarlo. Una hora estampada al encolar llega vieja — quedaba entre
+8 y 15 segundos atrasado.
+
+Encola `SET_TIME` con `{}` y [handleReceiveCmd](../lib/handlers/protocol-handlers.ts)
+estampa la hora en el momento de la entrega. Resultado verificado: **desviación
+cero**.
+
+```
+recibido 18:34:50  ->  dispositivo dice: 2026-08-05 18:34:50
+```
+
+Si necesitas una hora específica, `{"time":"YYYYMMDDhhmmss"}` sigue funcionando y
+tiene precedencia.
+
+### Herramientas de diagnóstico disponibles
+
+```bash
+npm run sniffer          # Proxy TCP: muestra los bytes exactos en ambas direcciones
+npm run handshake-probe  # Servidor TCP crudo que le habla primero al dispositivo
+```
+
+**`npm run sniffer`** — proxy transparente. Por defecto escucha en 3001 y
+reenvía a 3000. Configurable con `SNIFF_PORT` y `UPSTREAM_PORT`.
+
+Para capturar sin reconfigurar el dispositivo, ponlo delante de la app:
+
+```bash
+npx next dev -p 3002                                    # app en 3002
+SNIFF_PORT=3000 UPSTREAM_PORT=3002 npm run sniffer      # captura en 3000
+```
+
+El dashboard queda en `localhost:3002/admin` mientras dure la captura. Filtra el
+log por la IP del dispositivo para separarlo del tráfico del navegador:
+
+```bash
+grep "192.168.0.116" sniffer.log
+```
+
+**`npm run handshake-probe`** — para el caso en que el dispositivo abra la
+conexión y espere que el servidor hable primero. Rota un saludo distinto por
+cada conexión entrante y registra cualquier respuesta. Requiere el puerto que
+marca el dispositivo, así que detén el dev server antes. Configurable con
+`PROBE_PORT`, `QUIET_MS` y `DEV_IP`.
 
 ---
 

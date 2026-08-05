@@ -9,7 +9,9 @@ const COMMAND_TEMPLATES: Record<
 > = {
   // Gestión de dispositivos
   GET_DEVICE_STATUS: { label: 'Get Device Status' },
-  SET_TIME: { label: 'Set Device Time', params: { time: 'YYYYMMDDhhmmss' } },
+  // Leave params empty to sync to the server clock at delivery time — more
+  // accurate than pinning a timestamp when the command is queued.
+  SET_TIME: { label: 'Set Device Time (sync to server)' },
   SET_FK_NAME: {
     label: 'Set Device Name',
     params: { fk_name: 'device_name' },

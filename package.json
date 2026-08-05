@@ -3,12 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "tsx server.ts",
+    "dev:next": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "tsx server.ts --prod",
     "lint": "eslint",
     "test": "tsx --test \"lib/**/*.test.ts\" \"__tests__/**/*.test.ts\"",
     "simulator": "tsx scripts/simulator.ts",
+    "sniffer": "tsx scripts/sniffer.ts",
+    "handshake-probe": "tsx scripts/handshake-probe.ts",
     "e2e": "tsx scripts/e2e.ts"
   },
   "dependencies": {

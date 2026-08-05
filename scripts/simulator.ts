@@ -1,6 +1,7 @@
 import * as http from "http";
 import * as readline from "readline";
 import * as crypto from "crypto";
+import { parseBody } from "@/lib/protocol";
 
 const DEV_ID = process.env.DEV_ID || "SIM001";
 const SERVER_URL = process.env.SERVER_URL || "http://localhost:3000";
@@ -99,7 +100,7 @@ async function sendRequest(
       headers: {
         "Content-Type": "application/octet-stream",
         ...headers,
-      },
+      } as Record<string, string>,
     };
 
     if (body) {
@@ -167,22 +168,9 @@ async function receiveCmd() {
     const cmdCode = resp.headers["cmd_code"];
     const cmdBody = resp.body;
 
-    // Parse command parameters
-    let cmdParams: Record<string, any> = {};
-    try {
-      const jsonEnd = cmdBody.findIndex((b, i) => {
-        if (i === 0) return false;
-        let depth = 0;
-        for (let j = 0; j < i; j++) {
-          if (cmdBody[j] === 123) depth++; // {
-          if (cmdBody[j] === 125) depth--; // }
-        }
-        return depth === 0 && cmdBody[i] === 125;
-      });
-      if (jsonEnd > 0) {
-        cmdParams = JSON.parse(cmdBody.subarray(0, jsonEnd + 1).toString("utf-8"));
-      }
-    } catch {}
+    // Parse command parameters with the shared protocol parser, so the
+    // simulator reads responses the same way a real device does.
+    const cmdParams = parseBody(cmdBody).json ?? {};
 
     // Execute command
     const result = await executeCommand(cmdCode, cmdParams);
